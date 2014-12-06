@@ -1,0 +1,119 @@
+clear all;
+
+% lattice constant
+L = 5.0;
+
+% kpoints
+nkpts = 1;
+kpts = (2*pi/L)*linspace(0.25,0.25,nkpts);
+
+npts = 22;
+eps = 0.0;
+x = linspace(-L/2+eps, L/2+eps, npts)';
+delx = x(2) - x(1);
+npts = npts-1;
+x = x(1:npts);
+
+% potential
+V = -10.0*ones(npts,1);
+
+% create an initial guess
+a = 10.0;
+psi = exp(-a*x.^2);
+psi = psi./norm(psi(:));
+e = -5.0;
+
+Ek = zeros(npts,nkpts);
+psi = zeros(npts,npts,nkpts);
+for ik = 1:nkpts
+    % kinetic energy
+    Tk = -0.5*create_laplacian1d(npts,7,delx) - i*kpts(ik)*create_D_matrix(npts, 7, delx, 1) + 0.5*kpts(ik)^2*speye(npts);
+    H = Tk + spdiags(V(:),0,npts,npts);
+    [vv,dd] = eig(full(H));
+    psi(:,:,ik) = vv;
+    Ek(:,ik) = diag(dd);
+end
+
+nstates = 3;
+psi_k = psi(:,1:nstates,:);
+e = Ek(1:nstates);
+%psi_k = rand(npts,nstates,1);
+% e = -3.0*ones(nstates,1);
+ik = 1;
+
+% setup k-grid
+sidesz = (npts-1)/2;
+kx = 2*pi*(-sidesz:sidesz)'./delx./npts;
+k2 = kx.^2;
+
+niter = 1500;
+energies = zeros(nstates,niter);
+alpha = 0.01;
+for iter = 1:niter
+    % Bloch phase
+    phase1 = exp(i*kpts(ik).*x);
+    % inverse Bloch phase
+    phase2 = exp(-i*kpts(ik).*x);
+    % residual
+    r = zeros(npts,nstates);
+    % residual of the orbital charge density --> psi.^2
+    r2 = zeros(npts,nstates);
+    % the accumulation of the r2 over each state
+    r2norm = 0.0;
+    % corrections to the energies
+    edelta = zeros(nstates,1);
+    for ist = 1:nstates        
+        % compute a shift if one is needed
+        shift = 0.0;
+        if (e(ist,ik) > -0.0001)
+            shift = -0.05 + e(ist,ik);
+        end
+        
+        % apply the potential (with the shift if needed)
+        Vpsi = (V - shift*ones(npts,1)).*psi_k(:,ist,ik);
+        Tk = -i*kpts(ik)*create_D_matrix(npts, 7, delx, 1) + 0.5*kpts(ik)^2*speye(npts);
+        Vpsi = Vpsi - Tk*psi_k(:,ist,ik);
+        
+        % apply the convolution BSH operator
+        mu = sqrt(2.0*(shift-e(ist,ik)));
+        Vk = fftshift(fft(Vpsi));
+        Vk = ifftshift(Vk./(k2 +mu.^2*ones(npts,1)));
+        new_psi_k = -2.0.*ifft(Vk);
+        npnorm = norm(new_psi_k);
+        edelta(ist) = - Vpsi'*new_psi_k/npnorm/npnorm;
+
+        % do mixing
+        new_psi_k = alpha*new_psi_k + (1-alpha)*psi_k(:,ist,ik);
+        new_psi_k = new_psi_k/norm(new_psi_k(:));
+
+        % compute residuals
+        r(:,ist) = psi_k(:,ist,ik) - new_psi_k;
+        r2(:,ist) = conj(psi_k(:,ist,ik)).*psi_k(:,ist,ik)-conj(new_psi_k).*new_psi_k;
+        r2norm = r2norm + norm(r2(:,ist));
+        
+        % update the orbital
+        psi_k(:,ist,ik) = new_psi_k;
+    end
+
+    if (true)
+        % Compute the k-dependent Hamiltonian in the MO basis
+        Tk = -0.5*create_laplacian1d(npts,7,delx) - i*kpts(ik)*create_D_matrix(npts, 7, delx, 1) + 0.5*kpts(ik)^2*speye(npts);
+        H = Tk + spdiags(V(:),0,npts,npts);
+        Hmo_k = psi_k(:,:,ik)'*H*psi_k(:,:,ik);
+        Hmo_k = 0.5*(Hmo_k + Hmo_k')
+        [vv,dd] = eig(Hmo_k);
+
+        % update the energies and transform the orbitals accordingly
+         e(:,ik) = diag(dd);
+         energies(:,iter) = diag(dd);
+         psi_k(:,:,ik) = psi_k(:,:,ik)*vv;
+    else
+        % Update the energy the "old-fashioned way"
+        e(:,ik) = e(:,ik) + edelta;
+        
+        % Orthogonalize the orbitals using GS
+        psi_k(:,:,ik) = gram_schmidt(psi_k(:,:,ik));
+    end
+    
+    fprintf('rnorm:  %15.8f\n', r2norm); 
+end
